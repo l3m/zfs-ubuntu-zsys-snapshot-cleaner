@@ -8,6 +8,13 @@ type ZfsSnapshot = {
     CreationDate: System.DateTimeOffset
 }
 
+type ZfsSnapshots = {
+    ZSysId: string
+    // most recent of all snapshot in collection
+    CreationDate: System.DateTimeOffset 
+    Collection: ZfsSnapshot array
+}
+
 let runCmd cmd cmdArgs = 
     use p = new System.Diagnostics.Process()
     p.StartInfo <-
@@ -83,11 +90,76 @@ let zfsGetSnapshots () =
         )
     
     snapsById
-    |> Seq.iter (fun kv ->        
-        printf "%s %i\n" kv.Key kv.Value.Count)
+    |> Seq.map (fun kv ->
+        let mostRecent =
+            kv.Value
+            |> Seq.sortByDescending (fun x -> x.CreationDate)
+            |> Seq.head
+        {
+            ZSysId = kv.Key
+            Collection = kv.Value |> Array.ofSeq
+            CreationDate = mostRecent.CreationDate
+        }
+        )
+    |> Array.ofSeq
+
+let getLatestSnaps (snaps: ZfsSnapshots array) =
+    let sorted =
+        snaps
+        |> Array.filter (fun x -> Array.length x.Collection > 1)
+        |> Array.sortByDescending (fun x -> x.CreationDate)
     
+    let latest = Array.take 10 sorted
+    let others = Array.skip 10 sorted
+    latest, others 
+
+let zfsPrint (name: string) =
+    printf $"zfs %s{name}\n"
+
+let zfsDestroy (snapshot: ZfsSnapshots) =
+    snapshot.Collection
+    |> Array.iter (fun n ->
+        zfs $"destroy %s{n.FullName}"
+        |> System.Console.WriteLine)
+
+type Confirmation =
+    | Yes
+    | No
+    | All
+    | Exit
+
+let deleteIfConfirmed (snapshots: ZfsSnapshots array) =
+    let confirmDeletion (snapshot: ZfsSnapshots) =
+        let fmtDate = snapshot.CreationDate.ToString "dd.MM.yyy HH:mm:ss"
+        let msg = $"Confirm deleting of snapshots %s{snapshot.ZSysId} created %s{fmtDate} [y/n/A/x] (Yes, No, All, Exit)"
+        System.Console.WriteLine msg
+        let x = System.Console.ReadKey ()
+        match x.KeyChar with
+        | 'y'
+        | 'Y' -> Confirmation.Yes
+        | 'A' -> Confirmation.All
+        | 'x'
+        | 'X' -> Confirmation.Exit
+        | _ -> Confirmation.No
+    
+    let mutable confirmation = Confirmation.No
+    
+    for snapshot in snapshots do
+        match confirmation with
+        | Confirmation.All ->
+            zfsDestroy snapshot
+        | Confirmation.Exit ->
+            ()
+        | _ ->
+            confirmation <- confirmDeletion snapshot
+            if confirmation = Confirmation.Yes || confirmation = Confirmation.All then
+                zfsDestroy snapshot
 
 [<EntryPoint>]
-let main argv =
-    zfsGetSnapshots ()
+let main _ =
+    let snaps = zfsGetSnapshots ()
+    let _, others = getLatestSnaps snaps
+    
+    deleteIfConfirmed others
+    
     1
